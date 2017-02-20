@@ -1,0 +1,15 @@
+<launch>
+
+    <arg name="robot_init_x"/>
+    <arg name="robot_init_y"/>
+    <arg name="robot_init_yaw"/> 
+    <arg name="start_x_extra"/> 	
+
+	<node pkg="exp_examine_path" type="calc_metric_path" name="calc_metric_path" output="screen">
+		<param name="/robot_init_x" value="$(arg robot_init_x)" type="double"/>
+        <param name="/robot_init_y" value="$(arg robot_init_y)" type="double"/>  
+        <param name="/robot_init_yaw" value="$(arg robot_init_yaw)" type="double"/> 
+        <param name="/start_x_extra" value="$(arg start_x_extra)" type="double"/> 
+	</node>
+
+</launch>

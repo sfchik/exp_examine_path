@@ -1,0 +1,154 @@
+#include <exp_examine_path/calc_metric_path.h>
+
+void CalcMetricPath::initialize()
+{
+	//variable need to be initialized eg. cumulative_heading_change or else will get NaN error
+	counter_start_ = 0;
+	counter_printer_ = 0;
+	path_length_ = 0.0; 
+	path_deviation_ = 0.0;
+	yaw_degree_previous_ = 0.0;
+	cumulative_heading_change_ = 0.0;
+	path_deviation_ = 0.0;
+	zero_crossing_robot_ = -1;  //this is to minus off the last goal stopping
+	twist_sign_robot_ = true;
+	
+	//initialize for pedestrian
+	pedestrian_1_.configureStartAndGoal(25.0, 3.5, 5.0, 3.5);
+
+	flag_.flag = 0;
+
+	sub_odom_ = nh_.subscribe("/pedsim/robot_position", 1, &CalcMetricPath::callbackRobotOdometry, this);  //odom
+	sub_localization_ = nh_.subscribe("/amcl_pose", 1, &CalcMetricPath::callbackLocalization, this);
+	sub_goal_ = nh_.subscribe("/move_base/goal", 1, &CalcMetricPath::callbackGoal, this);
+	sub_twist_ = nh_.subscribe("/pedbot/control/cmd_vel", 1, &CalcMetricPath::callbackTwist, this);
+	sub_pedsim_ = nh_.subscribe("/pedsim/tracked_persons", 1, &CalcMetricPath::callbackPedsim, this);
+}
+
+void CalcMetricPath::loop()
+{
+	if(flag_.FIRST_ODOM == TRUE && flag_.FIRST_GOAL == TRUE 
+			&& flag_.FIRST_TWIST == TRUE && flag_.FIRST_PEDSIM == TRUE) {
+		path_length_ += calculatePathLength(robot_odometry_current_.pose.pose.position, robot_odometry_previous_.pose.pose.position);
+		cumulative_heading_change_ += calculateHeadingChange(robot_odometry_current_, yaw_degree_previous_);
+		calculatePathDeviation(robot_goal_, robot_odometry_current_);
+		zero_crossing_robot_ += calculateSmoothness(robot_twist_, robot_twist_prev_, twist_sign_robot_);
+		pedestrian_1_.calculatePedsimMetric(pedsim_tracked_.tracks[0].pose.pose);
+		if(counter_printer_ == 10) {
+				pedestrian_1_.printPedsimMetric();
+//			ROS_INFO("pl=%f CHC=%f dev=%f zc=%d", path_length_, 
+//									cumulative_heading_change_, path_deviation_, zero_crossing_robot_); //for path examine
+//			ROS_INFO("x=%f y=%f", robot_localiztion_.pose.pose.position.x, robot_localiztion_.pose.pose.position.y);
+			counter_printer_ = 0;
+		} else {
+			++counter_printer_;
+		}
+	}
+}
+
+void CalcMetricPath::callbackRobotOdometry(const nav_msgs::Odometry::ConstPtr& msg)
+{
+	flag_.FIRST_ODOM = TRUE;
+	robot_odometry_current_ = *msg;
+}
+
+void CalcMetricPath::callbackLocalization(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg)
+{
+	robot_localization_ = *msg;
+}
+
+void CalcMetricPath::callbackGoal(const move_base_msgs::MoveBaseActionGoal::ConstPtr& msg)
+{
+	flag_.FIRST_GOAL = TRUE;
+	robot_goal_ = *msg;
+}
+
+void CalcMetricPath::callbackTwist(const geometry_msgs::Twist::ConstPtr& msg)
+{
+	robot_twist_ = *msg;
+	if(robot_twist_.linear.x > 0.001) {
+		flag_.FIRST_TWIST = TRUE;
+	}
+}
+
+void CalcMetricPath::callbackPedsim(const pedsim_msgs::TrackedPersons::ConstPtr& msg)
+{
+	flag_.FIRST_PEDSIM = TRUE;
+	pedsim_tracked_ = *msg;
+}
+
+//void CalcMetricPath::calculatePedMetric(const ped
+
+float CalcMetricPath::calculatePathLength(const geometry_msgs::Point& current, geometry_msgs::Point& previous)
+{
+	float x_difference = current.x - previous.x;
+	float y_difference = current.y - previous.y;
+	float path_length = sqrt(x_difference*x_difference + y_difference*y_difference);
+	previous = current;
+	return path_length;
+}
+
+float CalcMetricPath::calculateHeadingChange(const nav_msgs::Odometry& current, float& yaw_degree_previous)
+{
+	double yaw_rad, dummy_pitch, dummy_roll;  //must be double, or else will have error
+	float yaw_angle_absolute, yaw_angle_change;
+	tf::Stamped<tf::Pose> quat;
+	geometry_msgs::PoseStamped msg_convert;
+
+	msg_convert.header = current.header;
+	msg_convert.pose = current.pose.pose;
+	poseStampedMsgToTF(msg_convert, quat);
+	quat.getBasis().getEulerYPR(yaw_rad, dummy_pitch, dummy_roll);
+
+	yaw_angle_absolute = 180.0*fabs(yaw_rad)/PI;
+	//the counter is just use to filter initial NaN data
+	if(counter_start_ > 2) {
+		yaw_angle_change = fabs(yaw_angle_absolute - yaw_degree_previous);
+		yaw_degree_previous = yaw_angle_absolute;
+		return yaw_angle_change;
+	} else {
+		++counter_start_;
+		return 0.0; 		
+	}
+}
+
+void CalcMetricPath::calculatePathDeviation(const move_base_msgs::MoveBaseActionGoal& goal, const nav_msgs::Odometry& odom)
+{
+	float deviation = 0.0;
+	deviation = fabs(odom.pose.pose.position.y - goal.goal.target_pose.pose.position.y);
+	path_deviation_ = (deviation>path_deviation_)?deviation:path_deviation_;
+}
+
+int CalcMetricPath::calculateSmoothness(const geometry_msgs::Twist& current, geometry_msgs::Twist& previous, bool& positive)
+{
+	float difference = current.linear.x - previous.linear.x;
+	if(positive && difference < 0.05) {
+		previous.linear.x = current.linear.x;
+		positive = false;
+		return 1;
+	} else if(!positive && difference > 0.05) {
+		previous.linear.x = current.linear.x;
+		positive = true;
+		return 1;
+	} else {
+		return 0;
+	}
+}
+
+int main(int argc, char **argv)
+{
+  //Initiate ROS
+  ros::init(argc, argv, "calculate_metric");
+
+	//Create an object of class CalcMetricPath that will take care of everything
+  CalcMetricPath cmp;
+	ros::Rate r(HZ);
+
+  while(ros::ok()) {
+		ros::spinOnce();
+		cmp.loop();		
+		r.sleep();
+	}
+
+  return 0;
+}
